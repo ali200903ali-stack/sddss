@@ -1,0 +1,61 @@
+name: NineSoft source integrity audit
+on:
+  push:
+    branches: [audit/deep-accounting-20261104]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Independently verify archive without executing application code
+        shell: bash
+        run: |
+          mkdir -p audit-evidence
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, pathlib, re, sys, tarfile, io, zipfile
+          root = pathlib.Path('source-archive')
+          report = {'source_commit': __import__('os').environ.get('GITHUB_SHA'), 'expected_sha256': 'f8166c30624ec4f3751edb250ffd9ceb17c2d653f2c448c62baa1aaef8b6ad9c', 'parts': [], 'ready': False}
+          chunks = []
+          try:
+              for i in range(9):
+                  p = root / ('NineSoft-Source-XZ.part%02d.b64' % i)
+                  b = p.read_bytes()
+                  clean = re.sub(rb'\s+', b'', b)
+                  report['parts'].append({'name': p.name, 'bytes': len(b), 'normalized_chars': len(clean), 'sha256': hashlib.sha256(b).hexdigest()})
+                  chunks.append(clean)
+              payload = base64.b64decode(b''.join(chunks), validate=True)
+              report['decoded_bytes'] = len(payload)
+              report['actual_sha256'] = hashlib.sha256(payload).hexdigest()
+              report['hash_matches'] = report['actual_sha256'] == report['expected_sha256']
+              try:
+                  unpacked = lzma.decompress(payload)
+                  report['lzma_valid'] = True
+                  report['uncompressed_bytes'] = len(unpacked)
+                  pathlib.Path('audit-evidence/source-decoded.bin').write_bytes(unpacked)
+              except Exception as exc:
+                  report['lzma_valid'] = False
+                  report['lzma_error'] = str(exc)
+              report['ready'] = report['hash_matches'] and report.get('lzma_valid', False)
+          except Exception as exc:
+              report['error'] = type(exc).__name__ + ': ' + str(exc)
+          pathlib.Path('audit-evidence/source-integrity.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+          print(json.dumps(report, indent=2))
+          sys.exit(0 if report['ready'] else 1)
+          PY
+      - name: Preserve evidence and exact input parts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ninesoft-source-integrity-inputs
+          path: |
+            source-archive/
+            SOURCE-ARCHIVE-README.md
+            audit-evidence/
+          if-no-files-found: error
+          retention-days: 7
